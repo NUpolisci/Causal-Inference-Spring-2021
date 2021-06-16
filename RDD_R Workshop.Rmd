@@ -1,0 +1,214 @@
+---
+title: "Regression Discontinuity in R"
+author: "Pilar Manzi"
+date: "4/28/2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, error = FALSE)
+
+library(tidyverse)
+library(haven)
+```
+
+
+# Puzzle and Data 
+
+Regression Discontinuity Designs is another strategy to approximate an experimental scenario where the treatment and control are very similar except for the presence/absence of treatment. We find these two groups in scenarios where there is some type of rule/threshold that determines whether a unit is treated or not. We can take advantage of this specific rule to compare units right above and right below this threshold. The assumption is that units that have very similar scores on that running variable are very much alike (all observed/unobserved characteristics are, on average, the same); the only thing that differs is that one got a barely higher score than the other.
+
+Examples include: test scores for school entrance/scholarships; elections (50% to win), social programs based on means-test (below income threshold to obtain aid).
+
+As we'll see below, there are maby different ways of estimating effects in RDD, the main alternative being between parametric and non-parametric model. As usual, this often entails a bias-variance trade-off. Regardless, it is always a good idea to test your model with different specifications to show your results are robust. 
+
+Note: today we'll be talking about *sharp* RD. This means there is a clear on/off switch that determines whether a unit is in/out of the treatment. When there is imperfect assignment, we are in the world of *fuzzy* RD. Just like when we deal with experiments with non-perfect compliance, in this scenario the discontinuity becomes an Instrumental Variable for treatment status. 
+
+In Mastering Metrics (chp 4), the authors show that there is a spike in deaths at age 21. Is this spike caused by the minimum legal drinking age (MLDA)? In this scenario, the treatment variable is being allowed to legally drink and the running variable is age. There is a clear cut-off point (age 21) that determines whether people are in or out of the treatment group. Thus, we can use this to our advantage and compare populations right above and right below the threshold (21). 
+
+We'll use the "mlda.rda" dataset. Rda is an R file, so we use call it using the 'load' command. 
+
+```{r}
+load(file = "mlda.rda")
+```
+
+## Explore the data and variables
+
+```{r}
+head(mlda)
+```
+
+Describe the running variable:
+
+```{r}
+summary(mlda$agecell)
+```
+
+Describe outcome variables:
+
+```{r}
+summary(mlda$mva)
+
+mlda %>% ggplot(aes(mva)) + geom_histogram()
+```
+
+## Relationship between drinking and deaths
+
+First, let's plot the relationship between deaths in moving vehicle accidents and age: 
+
+```{r}
+mlda %>% 
+  ggplot(aes(x = agecell, y = mva)) + 
+  geom_point() +
+  geom_vline(xintercept = 21) + 
+  labs(y = "Deaths in MVA", x = "Age")
+```
+
+There seems to be a discontinuity at 21, so we can estimate a RD regression. 
+
+## OLS 
+
+Let's see what sould happen if we modelled a simple linear relationship: 
+
+```{r}
+mlda %>% 
+  ggplot(aes(x = agecell, y = mva)) + 
+  geom_point() +
+  geom_vline(xintercept = 21) + 
+  geom_smooth(method = "lm") +
+  labs(y = "Deaths in MVA", x = "Age")
+```
+
+This doesn't seem to be capturing the jump at age 21. 
+
+Run the regression model corresponding to that plot: 
+
+```{r}
+lm(mva ~ agecell, data = mlda) %>% summary()
+```
+
+
+# RD estimation
+
+## Data prep
+
+Recall the equation of an RD regression:
+
+$Y_{i}=\beta_{0}+\beta_{1} T_{i}+\beta_{2}\left(X_{1 i}-C\right)+\epsilon_{i}$
+
+In our case this would be:
+
+$mva deaths=\beta_{0}+\beta_{1} T_{i}+\beta_{2}(age- 21)+\epsilon_{i}$
+
+Where T is the treatment variable that indicates whether the individual is above or below 21 years of age.
+
+Let's create this variable: 
+
+```{r}
+mlda <- mlda %>% mutate(treat = case_when(
+    agecell >= 21 ~ 1,
+    agecell < 21 ~ 0)
+    )
+```
+
+Check it looks okay by getting the min and max of each category:
+
+```{r}
+mlda %>% group_by(treat) %>% summarize(min(agecell), max(agecell))
+```
+
+Note that we are centering our running variable on the  cut-off point so that the cut-off point now represents zero. 
+
+## Simple RD regression 
+
+One way to estimate the effect of drinking age is through a simple regression, where we include the treatment variable (above or below cutoff) and the distance from the cutoff point.  
+
+```{r}
+lm(mva ~ treat + I(agecell - 21), data = mlda) %>% 
+  summary()
+```
+
+The most important coefficient hear is that of 'treat', which represents the bump in the regression. In this case, it indicates that the effect of drinking age on deaths by MVA is significant: deaths increase by 4.5 as a result of drinking age. The second coefficient represents the slope of the overall line, which is negative. Let's plot this: 
+
+```{r}
+mlda %>% 
+  ggplot(aes(x = agecell, y = mva)) + 
+  geom_point() +
+  geom_vline(xintercept = 21) + 
+   stat_smooth(aes(agecell, mva, group = treat), method = "lm") +
+  labs(y = "Deaths in MVA", x = "Age")
+```
+
+## RD regression: varying slopes
+
+In the above regression, we assume that the relationship between Y and the running variable has the same shape on both sides of the threshold. This makes sense in our case: it seems pretty clear that it there is a negative linear relationship on both sides of the cutoff.
+
+But if we wanted to measure the difference in the slopes of the line, we can include an interaction term in our model: 
+
+$Y_{i}=\beta_{0}+\beta_{1} T_{i}+\beta_{2}(age - 21)+\beta_{3}(age - 21) T_{i}+\epsilon_{i}$
+
+```{r}
+lm(mva ~ treat + I(agecell - 21) + treat*I(agecell - 21), data = mlda) %>%  summary()
+```
+
+$\beta_{2}$: slope of line below threshold
+$\beta_{3}$: interaction between Treatment and the running variable.
+
+This tells us how different the slope is above the threshold. 
+
+Since  $\beta_{2} = -2.56$ and $\beta_{3} = -1.16$, then the slope above the threshold is $-2.56 + -1.16 = -3.72$. 
+
+
+## Non-parametric estimation 
+
+If we don't want to deal with the decisions regarding the model, we can choose to run a simple linear regression but only with cases very near the cutoff point.
+
+In our case, we already have quite a narrow selection (2 years below and above 21), but let's reduce it even more.
+
+Let's create a subset of the data only with individuals from 20-22 years of age:
+
+```{r}
+mlda_subset <- mlda %>% filter(agecell>=20 & agecell<=22)
+```
+
+Check subset done correctly:
+
+```{r}
+summary(mlda_subset$agecell)
+```
+
+Now let's repeat the simple linear regression in this dataset:
+
+```{r}
+lm(mva ~ treat + I(agecell - 21) , data = mlda_subset) %>%  summary()
+```
+
+
+```{r}
+mlda_subset %>% 
+  ggplot(aes(x = agecell, y = mva)) + 
+  geom_point() +
+  geom_vline(xintercept = 21) + 
+   stat_smooth(aes(agecell, mva, group = treat), method = "lm") +
+  labs(y = "Deaths in MVA", x = "Age")
+```
+
+## Non- parametric estimation: optimal bandwith
+
+Often, it is not clear what the best bandwith is: should we use observations that are above/below 2 years? 3 years? 1.2 years?
+
+Imbens and Kalyanaraman came up with an algorithm to choose the "optimal bandwith". We can use the 'rdd' package to estimate our regression with this optimal bandwith. 
+
+```{r}
+library(rdd)
+
+# choose verbose = TRUE to get more details on the results, including the chosen bandwith
+
+RDestimate(mva ~ agecell, cutpoint = 21, data = mlda, verbose = TRUE)
+
+```
+
+This gives us the results of three regressions: one with the optimal bandwith (1.211 years of age), one with half the badwith, and one with double the bandwith. 
+
+It is important to note that we are obtaining an effect for a very narrow population (that close to the threshold), which is why we say this is a Local Average Treatment Effect. We have to be careful with the generalizations of our findings. 

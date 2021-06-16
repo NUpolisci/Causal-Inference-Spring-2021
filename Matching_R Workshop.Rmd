@@ -1,0 +1,366 @@
+---
+title: "Regression and Matching in R"
+author: "Pilar Manzi"
+date: "04/28/2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, error = FALSE, message = FALSE)
+
+library(tidyverse)
+library(haven)
+library(MatchIt)
+library(optmatch)
+library(cobalt)
+library(rstatix)
+library(sjPlot)
+```
+
+# About this workshop/document
+
+Note that this does not cover in-depth explanations of the methods, but instead focuses on how to run them in R, what packages to use, etc. Graphing is also not the focus here, so many figures have not been customized for a better appearance. 
+
+# The puzzle and data 
+
+Today we'll be investigating whether college educated individuals vote at higher rates? Does college education *cause* an increase in electoral participation? 
+
+We'll be working with the last wave of the World Value Survey, which has data for many countries across the world. On the folder, the file is called "WVS_crossnational.dta".
+
+Since it's an R file, we'll be using the 'read_RDS' command. 
+
+
+```{r}
+wvs <- readRDS("WVS_crossnational.rds")
+
+# to remove haven (stata) labels 
+wvs <- zap_labels(wvs)
+```
+
+To explore datasets, there are many useful commands: 'head', 'glimpse', 'names', 'str'. Because this one is pretty large, we'll go with 'head': 
+
+```{r}
+head(wvs)
+```
+
+## Explore and recode variables 
+
+We'll recode the variables we'll be using, mostly to remove DKs or to group categories. 
+
+Votes at the national level: Q222. Group 'always' and 'usually' (1 and 2 v 3, leave 4's out)
+
+```{r}
+wvs <- wvs %>% mutate(vote = case_when(
+  Q222==1 | Q222==2 ~ 1,
+  Q222==3 ~ 0
+))
+```
+
+College variable: based on Q275 (level of education), group 6-8 (Bachelors and Grad)
+
+```{r}
+wvs <- wvs %>% mutate(college = case_when(
+ Q275<6 ~0,
+ Q275 >5 ~ 1, 
+))
+```
+
+Father's education (Q278): just remove NAs
+
+```{r}
+wvs <- wvs %>% mutate(father_educ = case_when(
+  Q278>=0 ~ Q278
+))
+```
+
+Urban/rural: H_URBRURAL (1= urban, 2= rural)
+
+```{r}
+wvs <- wvs %>% mutate(urban = case_when(
+  H_URBRURAL == 1 ~ 1,
+  H_URBRURAL == 2 ~ 0
+))
+```
+
+
+Self-reported income scale: Q288, goes from 1 to 10 
+
+```{r}
+wvs <- wvs %>% mutate(income = case_when(
+  Q288>=0 ~ Q288
+))
+```
+
+Sex: Q260- rename and make into dummy (0,1)
+
+```{r}
+wvs <- wvs %>% mutate(sex = case_when(
+  Q260 == 1 ~ 1, 
+  Q260 == 2 ~ 0
+))
+```
+
+Race: Q290 (1= White, 2= Black, 3= Hispanic)
+```{r}
+wvs <- wvs %>% mutate(race = case_when (
+  Q290 == 840001 ~ 1, 
+  Q290 == 840002 ~ 2, 
+  Q290 == 840004 ~ 3
+))
+```
+
+Interest in politics: Q199-  only rename 
+
+```{r}
+wvs <- wvs %>% rename(interest = Q199)
+```
+
+
+# Simple t- test
+
+We can start off with a very simple, naive analysis: do college educated individuals vote more than non-college educated individuals? 
+
+Let's take a look at the difference in their means: 
+
+```{r}
+wvs %>% group_by(college) %>% summarize(mean(vote, na.rm = TRUE))
+```
+
+But we want to know whether these differences are statistically significant or not. This is where the t-test comes in. 
+
+```{r}
+ wvs %>% 
+  t_test(vote ~ college)
+```
+
+The advantage with this package is that you can combine it with dplyr. Perhaps we hypothesize that those that this relationship is not significant among those that are very interested in politics. 
+
+```{r}
+wvs %>% group_by(interest) %>%  t_test(vote ~ college)
+```
+
+# Regression 
+
+But we know we can't simply compare the averages of college/non-college individuals. One quick solution is to control for other variables that we think may matter in explaining this relationship: income (though post-treatment), race, sex, father's education, urban/rural, and political interest. 
+
+Since our outcome variable (vote) is binary, we enter into the debate of whether we should use logit or linear probability models. For the sake of simplicity, we'll use a linear model.
+
+*Note, the command to use a logit instead of LPM:* 
+```{r eval = FALSE}
+glm(vote ~ college + income + father_educ + sex + urban , 
+    data = wvs,
+    family = binomial)
+```
+
+Some things to keep in mind: we have a few categorical variables in this regression. For now, we can imagine that 'income' is continuous, but political interest is not (very, somewhat, not very, not at all). When we encounter such variables, there is one detail we need to include in the regression to tell R not to consider it as continuous (a "one unit increase" in that variable doesn't have much meaning). Instead, we create a dummy for each level of that variable (one for "Very Interested", one for "Somewhat interested", etc.). 
+
+```{r}
+lm(vote ~ college + income + father_educ + sex + urban +  factor(interest), data = wvs) %>% summary()
+```
+
+## Fixed effects 
+
+Of course, we are only capturing some of the things that may explain voter turnout besides college education. Some of those factors we should also take into account are country-level characteristics. Perhaps people are more generally less likely to vote in one country than in the other because of the quality of institutions, trust in elections, political crises, etc. We can control for these factors by including *country fixed effects*. 
+
+One way to do that in R is through the "least squared dummy variable" approach, which simply consist of making a dummy for each country. 
+
+```{r}
+lm(vote ~ college + factor(interest) + income + father_educ + sex + urban + factor(B_COUNTRY_ALPHA), 
+    data = wvs) %>% summary()
+```
+
+*Note: If you are working with panel data, you can use the plm package for more options*
+
+## Interaction terms
+
+Let's return to that hypothesis that perhaps college does not influence vote turnout among people that are very interested in politics. In other words, college has a different effect for people with different levels of interest. For this, we can implement an interaction term between those two variables: 
+
+```{r}
+mod <- lm(vote ~ college + factor(interest) + income + father_educ + sex + urban + college*factor(interest), data = wvs) 
+
+summary(mod)
+```
+
+Regression results of models with interaction terms are not easy to interpret. Instead, we can turn to graphs for some help. We'll use the sjPlot package for this. 
+
+```{r}
+plot_model(mod, type = "pred", terms = c("college", "interest[1,2,3,4]"))
+
+
+plot_model(mod, type = "pred", terms = c("interest[1,2,3,4]", "college"))
+```
+
+# Matching 
+
+Because regression is not the best tool for causal inference, let's now turn to matching. For this part, we'll work only with the U.S. and keep only the variables we need (and complete observations): 
+
+```{r}
+wvs_match <- wvs %>% filter(B_COUNTRY_ALPHA =="USA") %>% 
+  select(vote, college, sex, income, father_educ, race) %>% 
+  drop_na()
+```
+
+With matching, we are trying to replicate an experimental scenario where the only thing that differs between two units is the fact that one is treated (college eduaction) and the other is not. By making them as similar as possible, we can then attribute the difference in voting to the college education. 
+In an ideal world, we find two individuals that are exactly the same to each other (in a set of covariates you think are relevant) but one of those individuals went to college and the other did not. Since they have the same income level, race, and family background, we can then attribute the effect of 
+higher voting rates to college attendance.
+
+How plausible is it to find two people that are exactly the same in many dimensions? Not very plausible. Exact matching is impossible, so we turn to other techniques. One of the most common ones is propensity score matching. The propensity score basically reduces all of the covariates into one dimension, creating an index that indicates your probability of attending college. We then use this index to find matches. People who went to college (*the treatment group*) are matched with others with very similar propensity scores, but who did not go to college (*the control group*). Note, however, that at this stage we still face the same assumptions as OLS: that we are correctly specifying the model that determines college attendance. 
+
+Even within the world of propensity score matching, there are many different alternatives (with or without replacement, use of caliper, greedy vs optimal, etc.). In many of these cases, you will be facing a bias-variance tradeoff: one of them increases the amount of observations you use, the other increases the quality of the matches. 
+
+Importantly, it is OK to test out different methods *BEFORE* you estimate your effects. This is done to ensure that you have a balanced dataset before your estimation. A balanced dataset is one where the differences between the treatment and control groups (in your selected covariates) are minimal. One where the treated/control group look very much alike across these selected characteristics. If you have not achieved balance with your selected matching technique/propensity score model, you are expected to go back and tweak it (before peeking at the effects!). 
+
+Select covariate for match --> Run matching algorithm --> Balance? If not, return to step 1. If balanced --> Estimate effect 
+
+## Balance check
+
+As a first step in our analysis, let's check that the two groups (college and non-college) are indeed different to start with. We can do so by showing that covariates *are not* balanced.
+
+To check balance, run a regression where the treatment (college) is the outcome and the covariates are the predictore (use: income, race, sex, and father_educ). 
+
+When our data is *unbalanced*, predictors *should* explain some of the variation. 
+
+```{r}
+lm(college ~ income + factor(race) + sex + father_educ, 
+   data = wvs_match) %>% summary()
+```
+
+Let's check how the averages differ: 
+
+```{r}
+wvs_match %>% group_by(college) %>% summarize(mean(income), mean(sex), mean(father_educ))
+```
+
+## 1:1 matching on propensity score
+
+Propensity score matching is the most common method of matching. Propensity scores indicate how likely it is for a unit to be treated. To construt the propensity score, we need to build a model that predicts treatment (in this case, attending college). 
+
+Once we've constructed that propensity score, there are several alternatives as to which control unit to pick for each treated unit. In this case, we'll look for the closest match among the control, and we'll use that control only once. This means we'll match *without* replacement. Any control units that aren't matched with a treated unit will be discarded. 
+
+```{r}
+m.out1 <- matchit(college ~ income + sex + father_educ + factor(race), data = wvs_match, method = "nearest")
+```
+
+Let's print out some of the details on the matching method:
+```{r}
+m.out1
+```
+
+## Checking balance 
+
+Before estimating the ATT, we need to make sure we have a balanced sample. The whole purpose of matching is to replicate an experiment, where treated units are compared to very similar untreated units. This table allows us to see some of the differences in means between the treat/control across the set of covariates we chose. The first columns are the easiest to intepret, as they show you the averages in the two groups and the standardized mean differences (the closer to zero, the better). 
+
+```{r}
+summary(m.out1, un = FALSE)
+```
+
+Simply by comparing the means, we can see that we haven't done a great job achieving balance. For instance, Whites represent 89% of the treated sample and 74% of the control sample; men represent almost 70% of the treated sample and only 45% of the control. 
+
+There are many options to visualize balance checks; the 'cobalt' package is helpful for this. The following graph compares the standardized means before and after matching. Ideally, the red dots (after matching) should be very close to zero. This would mean that the differences in the averages of those variables have dissapeared. In other words, that we have made the treatment and control as similar as possible. 
+
+Here, we see that balance has actually become worse in many cases! Notice how the red dots are further away from zero than the blue dots (before matching). This is why it is so important to check balance before running our analysis. 
+
+```{r}
+love.plot(m.out1, binary = "std")
+```
+
+
+The table at the bottom of the 'summary' command is also important: it tells us how many of our units have been used in the matching. Notice there are 176 units that are left unused. It's important to check that we haven't lost too many observations, and that we still have a decent sized n to carry out the analysis. 
+
+
+## See matched data:
+
+To better understand what's happening behind Matching, it may be useful to visualize some specific cases. Here, we'll take a look at the first two matches (case 7 was matched with case 436). We see they are both men, and both white, yet the level of their father's education is very different.
+
+```{r}
+head(m.out1$match.matrix)
+
+i <- rownames(wvs_match) %in% c(11,33)
+wvs_match[i,]
+```
+
+## Caliper
+
+But what if the closest neighbor is actually quite different from the treated unit? To avoid this, we can use caliper: we impose a restriction on how far away the match can be. We establish that the propensity score of the match can be no more than x standard deviations away. Some researchers recommend using a caliper of 0.2 standard deviations. (If a control's propensity score is more than 0.2 standard deviations away from the treatment's propensity score, then they won't match). By doing this, we are ensuring better matches, but we may be losing some observations: if there are no control units less than 0.2 SD's away, then that observations is dropped. 
+
+The procedure is almost the same as above, except we include the option of caliper at the end: 
+
+```{r}
+m.out.caliper <- matchit(college ~ income + factor(race) + sex + father_educ, data = wvs_match, method = "nearest", distance = "glm", caliper = 0.2)
+```
+
+```{r}
+summary(m.out.caliper, un = FALSE)
+```
+
+This is looking much better! 
+
+```{r}
+love.plot(m.out.caliper, binary = "std")
+```
+
+## Full Matching
+
+Another alternative matching technique is the *full matching*, where each treated unit is matched with at least one other control unit, and every control to a treated unit. From Stuart and Green (2008): "full matching occurs "wherein  all  units,  both  treatment  and  control  (i.e.,  the  ”full”  sample), are  assigned  to  a  subclass  and  receive  at  least  one  match. The  matching  is  optimal  in the  sense  that  that  sum  of  the  absolute  distances  between  the  treated  and  control  unitsin  each  subclass  are  as  small  as  possible". "Full matching, first developed by Rosenbaum (1991) and illustrated by Hansen (2004), uses all available individuals in the data by grouping the individuals into a series of matched sets (subclasses), with each matched set containing at least 1 treated individual (who received the treatment of interest) and at least 1 comparison individual (who did not). Full matching forms these matched sets in an optimal way, such that treated individuals who have many comparison individuals who are similar (on the basis of the propensity score) will be grouped with many comparison individuals, whereas treated individuals with few similar comparison individuals will be grouped with relatively fewer comparison individuals. The method is thus more flexible than traditional k:1 matching, in which each treated individual is required to be matched with the same number of comparison individuals (k), regardless of whether each individual actually has k good matches (Ming & Rosenbaum, 2000)." 
+.footnote[https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5784842/]
+
+Again, we set this difference in the specifications after the model: 
+
+```{r}
+m.out2 <- matchit(college ~ income + factor(race) + sex + father_educ, data = wvs_match,
+method = "full", distance = "glm")
+```
+
+Let's get the basics:
+
+```{r}
+summary(m.out2, un= FALSE)
+```
+
+Balance is much better here. And, as the bottom table suggests, we've used *all* the observations. Some control units have been used more than once. 
+
+*Note on ESS (effective sample size): "Units may be weighted in such a way that they contribute less to the sample than would unweighted units, so the effective sample size (ESS) of the full matching weighted sample may be lower than even that of 1:1 pair matching."
+
+Let's visualize our balance with new graphs, again from the 'cobalt' package:
+
+```{r}
+love.plot(m.out2, binary = "std")
+```
+
+And we can plot individual variables to see how they changed before and after matching: 
+
+```{r}
+bal.plot(m.out2, var.name = "father_educ", which = "both")
+```
+
+
+```{r}
+bal.plot(m.out2, var.name = "income", which = "both")
+```
+
+
+## Estimating the effect of college attendance 
+
+Now that we are more confident that our matching technique worked, we can proceed to estimate the effect of college education on voting. Recall that in most cases, we will be estimating the Average Treatment Effect among the Treated. What this means is that we are compare the effect of going to college **among those that would have possibly gone to college**. 
+
+The only thing we need to do before running the regression is extracting the matched dataset. 
+
+```{r}
+m.data <- match.data(m.out2)
+```
+
+Let's take a look at the dataset. Notice it has a few extra variables (like weights).
+
+```{r}
+glimpse(m.data)
+```
+
+We can do this simply by running a regression and looking at the coefficient for the treatment variable. We will include the same covariates we included in the propensity score estimation to increase the precision of our estimate and correct for any remaining differences. But, in theory, we have already "controlled" for those covariates in our matching process. The only difference with this regression is that we are including weights. 
+
+```{r}
+lm(vote ~ college + factor(race) + income + father_educ + sex , data = m.data, weights = weights) %>% summary()
+```
+
+The results indicate that going to college does indeed have a positive and significant effect on voting.
